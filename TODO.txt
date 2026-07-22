@@ -1,0 +1,20 @@
+Check the observation with the wrappers from popgym like previousact, ....
+    vectorized env
+
+
+Check the DWN Controller paper to see how well the controllers do there.
+
+run the current code on google colab
+    Debug
+    Adjust the architecture
+
+Compare the architecture with the one used in Popgym
+
+Checkout POMDPs and see if they require previous action in their formulation and also check at how other RL with memory do e.g. atari with LSTM of cleanRL
+
+Read "Neural Co-state Policies: Structuring Hidden
+States in Recurrent Reinforcement Learning"
+
+Try out other type of RNN like GRU
+
+Test it out for other benchmarks

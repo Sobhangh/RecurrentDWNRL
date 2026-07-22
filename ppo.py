@@ -85,7 +85,7 @@ class Args:
     # WNN
     size: int = 512
     """the size of the hidden layers of the RNNDWN"""
-    bits: int = 64
+    bits: int = 63
     """the number of bits per input dimension for the thermometer"""
     n: int = 6
     """number of LUT inputs"""
@@ -194,7 +194,7 @@ class WNNActor(nn.Module):
         min_values = envs.single_observation_space.low
         max_values = envs.single_observation_space.high
         thermo.fit(torch.zeros((1, obs_dim), device=thermo_device), min_value=min_values, max_value=max_values)
-        print(f"Thermometer threshold values: {thermo.thresholds}")
+        #print(f"Thermometer threshold values: {thermo.thresholds}")
 
         init_log_alpha = args.init_log_alpha if hasattr(args, "init_log_alpha") else -0.6931
         self.actor = RNNDWN(
@@ -215,13 +215,26 @@ class WNNActor(nn.Module):
         #     nn.Tanh(),
         #     layer_init(nn.Linear(64, 1), std=1.0),
         # )
+        class EnsureSeqDim(nn.Module):
+            def forward(self, x):
+                return x.unsqueeze(1) if x.dim() == 2 else x
+
+        class RNNOutputLastStep(nn.Module):
+            def forward(self, rnn_out):
+                output, _ = rnn_out
+                return output[:, -1, :]
+
         self.critic = nn.Sequential(
-            nn.RNN(input_size=obs_dim,
-                   hidden_size=obs_dim * 2,
-                   num_layers=3,
-                   nonlinearity='tanh',
-                   batch_first=True),
-            nn.Linear(obs_dim * 2, 1)
+            EnsureSeqDim(),
+            nn.RNN(
+                input_size=obs_dim,
+                hidden_size=int(obs_dim * 2),
+                num_layers=3,
+                nonlinearity="tanh",
+                batch_first=True,
+            ),
+            RNNOutputLastStep(),
+            nn.Linear(int(obs_dim * 2), 1),
         )
 
     def get_value(self, x):
@@ -437,7 +450,7 @@ if __name__ == "__main__":
                 )
                 ret_mean = float(np.mean(episodic_returns))
                 ret_std = float(np.std(episodic_returns))
-                print(f"eval_episodic_return_mean={ret_mean}, eval_episodic_return_std={ret_std}")
+                print(f"Iteration {iteration} from {args.num_iterations}, eval_episodic_return_mean={ret_mean}, eval_episodic_return_std={ret_std}")
 
 
     envs.close()

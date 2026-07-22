@@ -50,14 +50,14 @@ class RNNDWN(nn.Module):
 
         self.preprocess = nn.Flatten()
         self.hidden_layers = nn.ModuleList()
-        self.hidden_layers.append(torch_dwn.LUTLayer(self.input_size + hidden_size, hidden_size, n=n, map=map))
+        self.hidden_layers.append(torch_dwn.LUTLayer(self.input_size + hidden_size, hidden_size, n=n, mapping=map))
 
         for _ in range(1, num_layers):
-            self.hidden_layers.append(torch_dwn.LUTLayer(hidden_size + hidden_size, hidden_size,n=n))
+            self.hidden_layers.append(torch_dwn.LUTLayer(hidden_size + hidden_size, hidden_size, n=n))
 
         #self.hidden_layer = self.hidden_layers[0]
         self.output_layer = nn.Sequential(
-            torch_dwn.LUTLayer(hidden_size, self.output_size),
+            torch_dwn.LUTLayer(hidden_size, self.output_size, n=2),
             torch_dwn.GroupSum(k=output_dim, tau=1.0)
         )
 
@@ -103,7 +103,7 @@ class RNNDWN(nn.Module):
 
         x = self.thermometer.binarize(x)
         next_input = self.preprocess(x)
-        print(f"Next input shape: {next_input.shape}")
+        #print(f"Next input shape: {next_input.shape}")
         next_hidden_states = []
 
         for layer_index, hidden_layer in enumerate(self.hidden_layers):

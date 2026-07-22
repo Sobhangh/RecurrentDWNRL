@@ -3,6 +3,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
+from typing import Callable
 
 import gymnasium as gym
 import numpy as np
@@ -16,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from RNNDWN import RNNDWN
 from thermometer import ThermometerGaussian
 import popgym
+
 
 @dataclass
 class Args:
@@ -83,7 +85,7 @@ class Args:
     # WNN
     size: int = 512
     """the size of the hidden layers of the RNNDWN"""
-    bits: int = 63
+    bits: int = 64
     """the number of bits per input dimension for the thermometer"""
     n: int = 6
     """number of LUT inputs"""
@@ -105,6 +107,45 @@ def make_env(env_id, idx, capture_video, run_name):
 
     return thunk
 
+def evaluate(
+    agent,
+    train_enviroment,
+    make_env: Callable,
+    env_id: str,
+    eval_episodes: int,
+    run_name: str = "eval",
+    device: torch.device = torch.device("cpu"),
+    capture_video: bool = True,
+    writer=None,
+    global_step= 0,
+):
+    envs = gym.vector.SyncVectorEnv([make_env(env_id, 0, capture_video, run_name)])
+    agent.eval()
+
+    obs, _ = envs.reset()
+    episodic_returns = []
+    episodic_lengths = []
+    while len(episodic_returns) < eval_episodes:
+        with torch.no_grad():
+            actions, _, _, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
+        next_obs, _, _, _, infos = envs.step(actions.cpu().numpy())
+        if "final_info" in infos:
+            for info in infos["final_info"]:
+                if "episode" not in info:
+                    continue
+                print(f"eval_episode={len(episodic_returns)}, episodic_return={info['episode']['r']}")
+                episodic_returns += [info["episode"]["r"]]
+                episodic_lengths += [info["episode"]["l"]]
+        obs = next_obs
+    ret_mean = float(np.mean(episodic_returns))
+    ret_std = float(np.std(episodic_returns))
+    len_mean = float(np.mean(episodic_lengths))
+    if writer is not None:
+        writer.add_scalar("eval/episodic_return_mean", ret_mean, global_step or 0)
+        writer.add_scalar("eval/episodic_return_std", ret_std, global_step or 0)
+        writer.add_scalar("eval/episodic_length_mean", len_mean, global_step or 0)
+    agent.train()
+    return episodic_returns
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -378,6 +419,26 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+        # if we are at //20 of iterations, evaluate
+        eval_every = max(args.num_iterations // 20, 1)
+        # print(iteration, eval_every)
+        if (((iteration-1) % eval_every == 0)):
+                episodic_returns = evaluate(
+                    agent,
+                    envs,
+                    make_env,
+                    args.env_id,
+                    eval_episodes = 10,
+                    device = device,
+                    capture_video= False,
+                    writer=writer,
+                    global_step=global_step,
+                )
+                ret_mean = float(np.mean(episodic_returns))
+                ret_std = float(np.std(episodic_returns))
+                print(f"eval_episodic_return_mean={ret_mean}, eval_episodic_return_std={ret_std}")
+
 
     envs.close()
     writer.close()

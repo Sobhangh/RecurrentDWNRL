@@ -5,19 +5,20 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-import NavEnv
 import gymnasium as gym
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import tyro
+from tqdm import tqdm
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
 from RNNDWN import RNNDWN
 from thermometer import ThermometerGaussian
 import popgym
+from NavEnv import GridNavEnv
 
 
 @dataclass
@@ -40,7 +41,7 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "CartPole-v1"
+    env_id: str = "GridNav"
     """the id of the environment"""
     total_timesteps: int = 500000
     """total timesteps of the experiments"""
@@ -84,7 +85,7 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
     # WNN
-    size: int = 100
+    hidden_size: int = 100
     """the size of the hidden layers of the RNNDWN"""
     bits: int = 63
     """the number of bits per input dimension for the thermometer"""
@@ -96,12 +97,16 @@ class Args:
 
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
+        # if capture_video and idx == 0:
+        #     env = gym.make(env_id, render_mode="rgb_array")
+        #     env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+        # else:
+        #    env = gym.make(env_id)
         if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
+            env = GridNavEnv(dimension=4, render_mode="human")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = gym.make(env_id)
-        env = NavEnv(dimension=4, render_mode="human")
+            env = GridNavEnv(dimension=4, render_mode="human")
         #env = popgym.envs.position_only_cartpole.PositionOnlyCartPoleEasy()
         #env = gym.wrappers.FlattenObservation(env) 
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -125,12 +130,19 @@ def evaluate(
     agent.eval()
 
     obs, _ = envs.reset()
+    eval_hidden = agent.actor.init_hidden(batch_size=1, device=device, dtype=torch.float32)
+    eval_done = torch.zeros(1, device=device, dtype=torch.float32)
     episodic_returns = []
     episodic_lengths = []
     while len(episodic_returns) < eval_episodes:
         with torch.no_grad():
-            actions, _, _, _ = agent.get_action_and_value(torch.Tensor(obs).to(device))
-        next_obs, _, _, _, infos = envs.step(actions.cpu().numpy())
+            actions, _, _, _, eval_hidden = agent.get_action_and_value(
+                torch.Tensor(obs).to(device),
+                eval_hidden,
+                eval_done,
+            )
+        next_obs, _, terminations, truncations, infos = envs.step(actions.cpu().numpy())
+        eval_done = torch.as_tensor(np.logical_or(terminations, truncations), device=device, dtype=torch.float32)
         if "final_info" in infos:
             for info in infos["final_info"]:
                 if "episode" not in info:
@@ -203,7 +215,7 @@ class WNNActor(nn.Module):
         init_log_alpha = args.init_log_alpha if hasattr(args, "init_log_alpha") else -0.6931
         self.actor = RNNDWN(
             input_dim=obs_dim,
-            hidden_size=args.size,
+            hidden_size=args.hidden_size,
             output_dim=act_dim,
             num_layers=args.nb_layers,
             thresholds=None,
@@ -244,12 +256,63 @@ class WNNActor(nn.Module):
     def get_value(self, x):
         return self.critic(x)
 
-    def get_action_and_value(self, x, action=None):
-        logits = self.actor(x)
-        probs = Categorical(logits=logits)
-        if action is None:
-            action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+    def get_action_and_value(self, x, hidden_state=None, done=None, action=None):
+        if x.dim() != 2:
+            raise ValueError("x must have shape (batch_size, features)")
+
+        if hidden_state is None:
+            hidden_state = self.actor.init_hidden(batch_size=x.shape[0], device=x.device, dtype=x.dtype)
+
+        batch_size = hidden_state.shape[1]
+        is_sequence_batch = x.shape[0] != batch_size
+
+        if done is None:
+            done = torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
+        else:
+            done = done.to(device=x.device, dtype=x.dtype).view(-1)
+
+        if is_sequence_batch:
+            if x.shape[0] % batch_size != 0:
+                raise ValueError("Sequence batch does not align with hidden-state batch size")
+            seq_len = x.shape[0] // batch_size
+            x_seq = x.view(seq_len, batch_size, -1)
+            done_seq = done.view(seq_len, batch_size)
+            if action is not None:
+                action_seq = action.view(seq_len, batch_size)
+            else:
+                action_seq = None
+        else:
+            seq_len = 1
+            x_seq = x.view(1, batch_size, -1)
+            done_seq = done.view(1, batch_size)
+            if action is not None:
+                action_seq = action.view(1, batch_size)
+            else:
+                action_seq = None
+
+        logits_steps = []
+        next_hidden = hidden_state
+        for t in range(seq_len):
+            next_hidden = next_hidden * (1.0 - done_seq[t]).view(1, batch_size, 1)
+            logits_t, next_hidden = self.actor(x_seq[t], next_hidden)
+            logits_steps.append(logits_t)
+
+        logits = torch.stack(logits_steps, dim=0)
+        logits_flat = logits.reshape(-1, logits.shape[-1])
+        probs = Categorical(logits=logits_flat)
+
+        if action_seq is None:
+            sampled = probs.sample()
+            action_out = sampled if is_sequence_batch else sampled.view(batch_size)
+            logprob = probs.log_prob(sampled)
+        else:
+            action_flat = action_seq.reshape(-1).long()
+            action_out = action_flat if is_sequence_batch else action_flat.view(batch_size)
+            logprob = probs.log_prob(action_flat)
+
+        entropy = probs.entropy()
+        value = self.critic(x)
+        return action_out, logprob, entropy, value, next_hidden
 
 
 if __name__ == "__main__":
@@ -258,6 +321,7 @@ if __name__ == "__main__":
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    print(f"Run name: {run_name}")
     if args.track:
         import wandb
 
@@ -290,6 +354,7 @@ if __name__ == "__main__":
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
+    print("environment setup done")
     # agent = Agent(envs).to(device)
     agent = WNNActor(envs, args).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -308,8 +373,12 @@ if __name__ == "__main__":
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
+    next_actor_hidden = agent.actor.init_hidden(batch_size=args.num_envs, device=device, dtype=next_obs.dtype)
+    
+    print("Starting training...")
+    for iteration in tqdm(range(1, args.num_iterations + 1)):
+        initial_actor_state = next_actor_hidden.clone()
 
-    for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -323,7 +392,11 @@ if __name__ == "__main__":
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value = agent.get_action_and_value(next_obs)
+                action, logprob, _, value, next_actor_hidden = agent.get_action_and_value(
+                    next_obs,
+                    next_actor_hidden,
+                    next_done,
+                )
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -361,20 +434,30 @@ if __name__ == "__main__":
         b_obs = obs.reshape((-1,) + envs.single_observation_space.shape)
         b_logprobs = logprobs.reshape(-1)
         b_actions = actions.reshape((-1,) + envs.single_action_space.shape)
+        b_dones = dones.reshape(-1)
         b_advantages = advantages.reshape(-1)
         b_returns = returns.reshape(-1)
         b_values = values.reshape(-1)
 
         # Optimizing the policy and value network
-        b_inds = np.arange(args.batch_size)
+        assert args.num_envs % args.num_minibatches == 0
+        envsperbatch = args.num_envs // args.num_minibatches
+        envinds = np.arange(args.num_envs)
+        flatinds = np.arange(args.batch_size).reshape(args.num_steps, args.num_envs)
         clipfracs = []
         for epoch in range(args.update_epochs):
-            np.random.shuffle(b_inds)
-            for start in range(0, args.batch_size, args.minibatch_size):
-                end = start + args.minibatch_size
-                mb_inds = b_inds[start:end]
-
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds])
+            np.random.shuffle(envinds)
+            for start in range(0, args.num_envs, envsperbatch):
+                end = start + envsperbatch
+                mbenvinds = envinds[start:end]
+                mb_inds = flatinds[:, mbenvinds].ravel()  # be really careful about the index
+                mb_hidden = initial_actor_state[:, mbenvinds].contiguous()
+                _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(
+                    b_obs[mb_inds],
+                    mb_hidden,
+                    b_dones[mb_inds],
+                    b_actions.long()[mb_inds],
+                )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -419,8 +502,6 @@ if __name__ == "__main__":
             if args.target_kl is not None and approx_kl > args.target_kl:
                 break
 
-        agent.actor.reset_hidden_state(batch_size=args.num_envs, device=device, dtype=torch.float32)
-
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
@@ -437,6 +518,7 @@ if __name__ == "__main__":
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
+        #print(f"Iteration {iteration} from {args.num_iterations}, SPS={int(global_step / (time.time() - start_time))}, value_loss={v_loss.item()}, policy_loss={pg_loss.item()}, entropy={entropy_loss.item()}, old_approx_kl={old_approx_kl.item()}, approx_kl={approx_kl.item()}, clipfrac={np.mean(clipfracs)}, explained_variance={explained_var}")
         # if we are at //20 of iterations, evaluate
         eval_every = max(args.num_iterations // 20, 1)
         # print(iteration, eval_every)
@@ -448,7 +530,7 @@ if __name__ == "__main__":
                     args.env_id,
                     eval_episodes = 10,
                     device = device,
-                    capture_video= False,
+                    capture_video= True,
                     writer=writer,
                     global_step=global_step,
                 )

@@ -1,4 +1,4 @@
-import torch_dwn
+#import torch_dwn
 import torchlogix
 import torch
 import torch.nn as nn
@@ -49,44 +49,39 @@ class RNNDWN(nn.Module):
             raise ValueError("num_layers must be at least 1")
 
         self.input_size = input_dim * 3 #bits
-        self.output_size = output_dim * 10
+        self.output_size = output_dim * 15
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bits = bits
         #self.thresholds = thresholds
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        thresholds = torch.tensor([0,1,2], dtype=torch.float32)
-        self.binarization = FixedBinarization(thresholds=thresholds,feature_dim=1)
-        self.preprocess = nn.Flatten()
+        thresholds = torch.tensor([0,1,2], dtype=torch.float32).to(device)
+        self.binarization = FixedBinarization(thresholds=thresholds,feature_dim=1).to(device)
+        self.preprocess = nn.Flatten().to(device)
         self.hidden_layers = nn.ModuleList()
-        self.hidden_layers.append(LogicDense(self.input_size + hidden_size, hidden_size, lut_rank=n, connections=map, parametrization="warp"))
+        self.hidden_layers.append(LogicDense(self.input_size + hidden_size, hidden_size, lut_rank=n, device=device, connections=map, parametrization="warp"))
 
         for _ in range(1, num_layers):
-            self.hidden_layers.append(LogicDense(hidden_size + hidden_size, hidden_size, lut_rank=n, parametrization="warp"))
+            self.hidden_layers.append(LogicDense(hidden_size + hidden_size, hidden_size, lut_rank=n, device=device, parametrization="warp"))
 
         #self.hidden_layer = self.hidden_layers[0]
         self.output_layer = nn.Sequential(
-            LogicDense(hidden_size, self.output_size, n=2),
-            GroupSum(k=output_dim, tau=1.0)
+            LogicDense(hidden_size, self.output_size, lut_rank=2, device=device),
+            GroupSum(k=output_dim, tau=1.0, device=device)
         )
 
-        self.register_buffer("hidden_state", torch.zeros(num_layers, 0, hidden_size))
-
-    def reset_hidden_state(self, batch_size=None, device=None, dtype=None):
-        if batch_size is None:
-            self.hidden_state = self.hidden_state.new_zeros(self.num_layers, 0, self.hidden_size)
-            return
-
+    def init_hidden(self, batch_size, device=None, dtype=None):
         if batch_size < 1:
             raise ValueError("batch_size must be at least 1")
 
         if device is None:
-            device = self.hidden_state.device
+            device = next(self.parameters()).device
 
         if dtype is None:
-            dtype = self.hidden_state.dtype
+            dtype = next(self.parameters()).dtype
 
-        self.hidden_state = torch.zeros(
+        return torch.zeros(
             self.num_layers,
             batch_size,
             self.hidden_size,
@@ -94,13 +89,7 @@ class RNNDWN(nn.Module):
             dtype=dtype,
         )
 
-    def _ensure_hidden_state(self, batch_size, x):
-        if self.hidden_state.shape[1] != batch_size:
-            self.reset_hidden_state(batch_size=batch_size, device=x.device, dtype=x.dtype)
-        elif self.hidden_state.device != x.device or self.hidden_state.dtype != x.dtype:
-            self.hidden_state = self.hidden_state.to(device=x.device, dtype=x.dtype)
-
-    def forward(self, x):
+    def forward(self, x, hidden_state=None):
         squeeze_output = False
         if x.dim() == 1:
             x = x.unsqueeze(0)
@@ -108,25 +97,37 @@ class RNNDWN(nn.Module):
         elif x.dim() != 2:
             raise ValueError("x must have shape (features,) or (batch_size, features)")
 
-        self._ensure_hidden_state(x.shape[0], x)
+        if hidden_state is None:
+            hidden_state = self.init_hidden(batch_size=x.shape[0], device=x.device, dtype=x.dtype)
+        else:
+            if hidden_state.dim() != 3:
+                raise ValueError("hidden_state must have shape (num_layers, batch_size, hidden_size)")
+            if hidden_state.shape[0] != self.num_layers:
+                raise ValueError(f"hidden_state must have {self.num_layers} layers")
+            if hidden_state.shape[1] != x.shape[0]:
+                raise ValueError("hidden_state batch size must match x batch size")
+            if hidden_state.shape[2] != self.hidden_size:
+                raise ValueError(f"hidden_state must have hidden size {self.hidden_size}")
+            if hidden_state.device != x.device or hidden_state.dtype != x.dtype:
+                hidden_state = hidden_state.to(device=x.device, dtype=x.dtype)
 
         x = self.binarization(x)
-        print(f"After binarization: {x}")
+        #print(f"After binarization: {x}")
         next_input = self.preprocess(x)
         #print(f"Next input shape: {next_input.shape}")
         next_hidden_states = []
 
         for layer_index, hidden_layer in enumerate(self.hidden_layers):
-            combined = torch.cat((next_input, self.hidden_state[layer_index]), dim=1)
+            combined = torch.cat((next_input, hidden_state[layer_index]), dim=1)
             layer_hidden_state = hidden_layer(combined)
             next_hidden_states.append(layer_hidden_state)
             next_input = layer_hidden_state
 
-        self.hidden_state = torch.stack(next_hidden_states, dim=0)
-        output = self.output_layer(self.hidden_state[-1])
+        next_hidden_state = torch.stack(next_hidden_states, dim=0)
+        output = self.output_layer(next_hidden_state[-1])
 
         if squeeze_output:
-            return output.squeeze(0)
+            return output.squeeze(0), next_hidden_state
         
-        return output
+        return output, next_hidden_state
     

@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
+import NavEnv
 import gymnasium as gym
 import numpy as np
 import torch
@@ -83,11 +84,11 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
     # WNN
-    size: int = 512
+    size: int = 100
     """the size of the hidden layers of the RNNDWN"""
     bits: int = 63
     """the number of bits per input dimension for the thermometer"""
-    n: int = 6
+    n: int = 4
     """number of LUT inputs"""
     nb_layers: int = 2
     """number of hidden layers"""
@@ -100,7 +101,8 @@ def make_env(env_id, idx, capture_video, run_name):
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = gym.make(env_id)
-        env = popgym.envs.position_only_cartpole.PositionOnlyCartPoleEasy()
+        env = NavEnv(dimension=4, render_mode="human")
+        #env = popgym.envs.position_only_cartpole.PositionOnlyCartPoleEasy()
         #env = gym.wrappers.FlattenObservation(env) 
         env = gym.wrappers.RecordEpisodeStatistics(env)
         return env
@@ -187,13 +189,15 @@ class WNNActor(nn.Module):
         super().__init__()
 
         obs_dim = np.array(envs.single_observation_space.shape).prod()
+        print(f"Observation dimension: {obs_dim}")
         act_dim = envs.single_action_space.n
+        print(f"Action dimension: {act_dim}")
         thermo_device = "cuda" if torch.cuda.is_available() and args.cuda else "cpu"
 
-        thermo = ThermometerGaussian(n_bits=args.bits, device=thermo_device)
-        min_values = envs.single_observation_space.low
-        max_values = envs.single_observation_space.high
-        thermo.fit(torch.zeros((1, obs_dim), device=thermo_device), min_value=min_values, max_value=max_values)
+        #thermo = ThermometerGaussian(n_bits=args.bits, device=thermo_device)
+        #min_values = envs.single_observation_space.low
+        #max_values = envs.single_observation_space.high
+        #thermo.fit(torch.zeros((1, obs_dim), device=thermo_device), min_value=min_values, max_value=max_values)
         #print(f"Thermometer threshold values: {thermo.thresholds}")
 
         init_log_alpha = args.init_log_alpha if hasattr(args, "init_log_alpha") else -0.6931
@@ -202,7 +206,7 @@ class WNNActor(nn.Module):
             hidden_size=args.size,
             output_dim=act_dim,
             num_layers=args.nb_layers,
-            thermometer=thermo,
+            thresholds=None,
             bits=args.bits,
             n=args.n,
             init_log_alpha=init_log_alpha,
@@ -227,14 +231,14 @@ class WNNActor(nn.Module):
         self.critic = nn.Sequential(
             EnsureSeqDim(),
             nn.RNN(
-                input_size=obs_dim,
-                hidden_size=int(obs_dim * 2),
+                input_size=int(obs_dim),
+                hidden_size=int(32),
                 num_layers=3,
                 nonlinearity="tanh",
                 batch_first=True,
             ),
             RNNOutputLastStep(),
-            nn.Linear(int(obs_dim * 2), 1),
+            nn.Linear(int(32), 1),
         )
 
     def get_value(self, x):

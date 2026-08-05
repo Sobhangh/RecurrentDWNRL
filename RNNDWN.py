@@ -1,6 +1,13 @@
 import torch_dwn
+import torchlogix
 import torch
 import torch.nn as nn
+
+from torchlogix.layers import (
+        FixedBinarization,
+        GroupSum,
+        LogicDense,
+)
 
 class RegressionBucketLayer(nn.Module):
     """Input: Popcounts for each dimension, Outputs: rescaled actions"""
@@ -30,7 +37,7 @@ class RNNDWN(nn.Module):
     
     def __init__(self, input_dim, 
                  bits,
-                 thermometer,
+                 thresholds,
                  hidden_size, 
                  output_dim, 
                  n=6,
@@ -41,24 +48,26 @@ class RNNDWN(nn.Module):
         if num_layers < 1:
             raise ValueError("num_layers must be at least 1")
 
-        self.input_size = input_dim * bits
-        self.output_size = output_dim * 100
+        self.input_size = input_dim * 3 #bits
+        self.output_size = output_dim * 10
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bits = bits
-        self.thermometer = thermometer
+        #self.thresholds = thresholds
 
+        thresholds = torch.tensor([0,1,2], dtype=torch.float32)
+        self.binarization = FixedBinarization(thresholds=thresholds,feature_dim=1)
         self.preprocess = nn.Flatten()
         self.hidden_layers = nn.ModuleList()
-        self.hidden_layers.append(torch_dwn.LUTLayer(self.input_size + hidden_size, hidden_size, n=n, mapping=map))
+        self.hidden_layers.append(LogicDense(self.input_size + hidden_size, hidden_size, lut_rank=n, connections=map, parametrization="warp"))
 
         for _ in range(1, num_layers):
-            self.hidden_layers.append(torch_dwn.LUTLayer(hidden_size + hidden_size, hidden_size, n=n))
+            self.hidden_layers.append(LogicDense(hidden_size + hidden_size, hidden_size, lut_rank=n, parametrization="warp"))
 
         #self.hidden_layer = self.hidden_layers[0]
         self.output_layer = nn.Sequential(
-            torch_dwn.LUTLayer(hidden_size, self.output_size, n=2),
-            torch_dwn.GroupSum(k=output_dim, tau=1.0)
+            LogicDense(hidden_size, self.output_size, n=2),
+            GroupSum(k=output_dim, tau=1.0)
         )
 
         self.register_buffer("hidden_state", torch.zeros(num_layers, 0, hidden_size))
@@ -101,7 +110,8 @@ class RNNDWN(nn.Module):
 
         self._ensure_hidden_state(x.shape[0], x)
 
-        x = self.thermometer.binarize(x)
+        x = self.binarization(x)
+        print(f"After binarization: {x}")
         next_input = self.preprocess(x)
         #print(f"Next input shape: {next_input.shape}")
         next_hidden_states = []

@@ -6,6 +6,7 @@ import queue
 from typing import Optional
 
 import numpy as np
+from collections import deque
 
 try:
 	import gymnasium as gym
@@ -50,11 +51,13 @@ class GridNavEnv(gym.Env):
 		self.agent_pos = self.start_pos
 		self.obstacle_grid = np.zeros((self.dimension, self.dimension), dtype=np.uint8)
 		self.obstacles = np.empty((0, 2), dtype=np.int32)
+		self.episode_return = 0.0
+		self.episode_length = 0
 
 		self._generate_obstacles()
 
 	def check_path_exists(self):
-		from collections import deque
+		
 		visited = np.zeros((self.dimension, self.dimension), dtype=bool)
 		queue = deque([self.start_pos])
 		visited[self.start_pos] = True
@@ -94,6 +97,7 @@ class GridNavEnv(gym.Env):
 
 		no_path = True
 		while no_path:
+			self.obstacle_grid.fill(0)
 			sampled_indices = self.np_random.choice(len(candidates), size=obstacle_count, replace=False)
 			sampled = np.array([candidates[i] for i in sampled_indices], dtype=np.int32)
 
@@ -123,6 +127,8 @@ class GridNavEnv(gym.Env):
 	def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
 		super().reset(seed=seed)
 		self.agent_pos = self.start_pos
+		self.episode_return = 0.0
+		self.episode_length = 0
 		self._generate_obstacles()
 
 		observation = self._adjacent_observation()
@@ -163,15 +169,21 @@ class GridNavEnv(gym.Env):
 		elif hit_obstacle:
 			reward = -5.0
 			nr, nc = r, c
-			terminated = False
 		self.agent_pos = (nr, nc)
+		self.episode_return += float(reward)
+		self.episode_length += 1
 
 		observation = self._adjacent_observation()
 		info = {
 			"agent_pos": self.agent_pos,
-			"goal_pos": self.goal_pos,
 			"hit_obstacle": hit_obstacle,
 		}
+
+		# if terminated or truncated:
+		# 	info["episode"] = {
+		# 		"r": self.episode_return,
+		# 		"l": self.episode_length,
+		# 	}
 
 		if self.render_mode == "human":
 			self.render()

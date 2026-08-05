@@ -31,9 +31,9 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    track: bool = False
+    track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "ReccurentDLGRL"
     """the wandb's project name"""
     wandb_entity: str = None
     """the entity (team) of wandb's project"""
@@ -45,9 +45,9 @@ class Args:
     """the id of the environment"""
     total_timesteps: int = 500000
     """total timesteps of the experiments"""
-    learning_rate: float = 2.5e-4
+    learning_rate: float = 5e-3
     """the learning rate of the optimizer"""
-    num_envs: int = 4
+    num_envs: int = 8
     """the number of parallel game environments"""
     num_steps: int = 128
     """the number of steps to run in each environment per policy rollout"""
@@ -103,10 +103,11 @@ def make_env(env_id, idx, capture_video, run_name):
         # else:
         #    env = gym.make(env_id)
         if capture_video and idx == 0:
-            env = GridNavEnv(dimension=4, render_mode="human")
+            env = GridNavEnv(dimension=4, render_mode="rgb_array")
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = GridNavEnv(dimension=4, render_mode="human")
+            env = GridNavEnv(dimension=4, render_mode="rgb_array")
+            print(f"env_id={env_id}, idx={idx}, capture_video={capture_video}, run_name={run_name}")
         #env = popgym.envs.position_only_cartpole.PositionOnlyCartPoleEasy()
         #env = gym.wrappers.FlattenObservation(env) 
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -324,7 +325,8 @@ if __name__ == "__main__":
     print(f"Run name: {run_name}")
     if args.track:
         import wandb
-
+        from cred import cred
+        wandb.login(key=cred)
         wandb.init(
             project=args.wandb_project_name,
             entity=args.wandb_entity,
@@ -386,6 +388,7 @@ if __name__ == "__main__":
             optimizer.param_groups[0]["lr"] = lrnow
 
         for step in range(0, args.num_steps):
+            #print(f"Iteration {iteration}, Step {step}, Global Step {global_step}")
             global_step += args.num_envs
             obs[step] = next_obs
             dones[step] = next_done
@@ -407,10 +410,22 @@ if __name__ == "__main__":
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
-            if "final_info" in infos:
+            #print(f"infos: {infos}")
+            if "episode" in infos:
+                #print("final info")
+                ep_mask = infos.get("_episode", np.logical_or(terminations, truncations))
+                ep = infos["episode"]
+                for i, ended in enumerate(ep_mask):
+                    if ended:
+                        r = float(ep["r"][i])
+                        l = int(ep["l"][i])
+                        #print(f"global_step={global_step}, episodic_return={r}")
+                        writer.add_scalar("charts/episodic_return", r, global_step)
+                        writer.add_scalar("charts/episodic_length", l, global_step)
+            elif "final_info" in infos:
                 for info in infos["final_info"]:
                     if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                        #print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
@@ -446,6 +461,7 @@ if __name__ == "__main__":
         flatinds = np.arange(args.batch_size).reshape(args.num_steps, args.num_envs)
         clipfracs = []
         for epoch in range(args.update_epochs):
+            #print(f"        Epoch {epoch}")
             np.random.shuffle(envinds)
             for start in range(0, args.num_envs, envsperbatch):
                 end = start + envsperbatch
@@ -520,9 +536,9 @@ if __name__ == "__main__":
 
         #print(f"Iteration {iteration} from {args.num_iterations}, SPS={int(global_step / (time.time() - start_time))}, value_loss={v_loss.item()}, policy_loss={pg_loss.item()}, entropy={entropy_loss.item()}, old_approx_kl={old_approx_kl.item()}, approx_kl={approx_kl.item()}, clipfrac={np.mean(clipfracs)}, explained_variance={explained_var}")
         # if we are at //20 of iterations, evaluate
-        eval_every = max(args.num_iterations // 20, 1)
+        eval_every = max(args.num_iterations // 10, 1)
         # print(iteration, eval_every)
-        if (((iteration-1) % eval_every == 0)):
+        if (((iteration) % eval_every == 0)):
                 episodic_returns = evaluate(
                     agent,
                     envs,

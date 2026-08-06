@@ -2,6 +2,7 @@
 import os
 import random
 import time
+import warnings
 from dataclasses import dataclass
 from typing import Callable
 
@@ -104,7 +105,16 @@ def make_env(env_id, idx, capture_video, run_name):
         #    env = gym.make(env_id)
         if capture_video and idx == 0:
             env = GridNavEnv(dimension=4, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+            # Gymnasium may import moviepy for video recording, which can emit
+            # a Python 3.12 SyntaxWarning from moviepy's legacy config file.
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r".*invalid escape sequence '\\P'.*",
+                    category=SyntaxWarning,
+                    module=r"moviepy\.config_defaults",
+                )
+                env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = GridNavEnv(dimension=4, render_mode="rgb_array")
             print(f"env_id={env_id}, idx={idx}, capture_video={capture_video}, run_name={run_name}")
@@ -538,7 +548,7 @@ if __name__ == "__main__":
         # if we are at //20 of iterations, evaluate
         eval_every = max(args.num_iterations // 10, 1)
         # print(iteration, eval_every)
-        if (((iteration) % eval_every == 0)):
+        if (((iteration -1) % eval_every == 0)):
                 episodic_returns = evaluate(
                     agent,
                     envs,

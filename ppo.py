@@ -117,7 +117,7 @@ def make_env(env_id, idx, capture_video, run_name):
                 env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
             env = GridNavEnv(dimension=4, render_mode="rgb_array")
-            print(f"env_id={env_id}, idx={idx}, capture_video={capture_video}, run_name={run_name}")
+            #print(f"env_id={env_id}, idx={idx}, capture_video={capture_video}, run_name={run_name}")
         #env = popgym.envs.position_only_cartpole.PositionOnlyCartPoleEasy()
         #env = gym.wrappers.FlattenObservation(env) 
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -154,7 +154,18 @@ def evaluate(
             )
         next_obs, _, terminations, truncations, infos = envs.step(actions.cpu().numpy())
         eval_done = torch.as_tensor(np.logical_or(terminations, truncations), device=device, dtype=torch.float32)
-        if "final_info" in infos:
+        if "episode" in infos:
+            #print("final info")
+            ep_mask = infos.get("_episode", np.logical_or(terminations, truncations))
+            ep = infos["episode"]
+            for i, ended in enumerate(ep_mask):
+                if ended:
+                    r = float(ep["r"][i])
+                    l = int(ep["l"][i])
+                    episodic_returns += [r]
+                    episodic_lengths += [l]
+            print(f"eval_episode={len(episodic_returns)} out of {eval_episodes}")
+        elif "final_info" in infos:
             for info in infos["final_info"]:
                 if "episode" not in info:
                     continue
@@ -181,30 +192,56 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
+
+        obs_dim = np.array(envs.single_observation_space.shape).prod()
+        self.memory = nn.RNN(
+            input_size=int(obs_dim),
+            hidden_size=int(32),
+            num_layers=3,
+            nonlinearity="tanh",
+            batch_first=True,
+        )
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            # layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            # nn.Tanh(),
+            # layer_init(nn.Linear(64, 64)),
+            # nn.Tanh(),
+            layer_init(nn.Linear(32, 1), std=1.0),
         )
         self.actor = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, envs.single_action_space.n), std=0.01),
+            # layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
+            # nn.Tanh(),
+            # layer_init(nn.Linear(64, 64)),
+            # nn.Tanh(),
+            layer_init(nn.Linear(32, envs.single_action_space.n), std=0.01),
         )
 
-    def get_value(self, x):
+    def get_states(self, x, hidden_state, done):
+        # RNN logic
+        batch_size = hidden_state.shape[1]
+        x = x.reshape((-1, batch_size, self.memory.input_size))
+        done = done.reshape((-1, batch_size))
+        new_x = []
+        for h, d in zip(x, done):
+            h, hidden_state = self.memory(
+                h.unsqueeze(0),
+                (1.0 - d).view(1, -1, 1) * hidden_state,
+            )
+            new_x += [h]
+        new_x = torch.flatten(torch.cat(new_x), 0, 1)
+        return new_x, hidden_state
+    
+    def get_value(self, x, hidden_state, done):
+        x, _ = self.get_states(x, hidden_state, done)
         return self.critic(x)
 
-    def get_action_and_value(self, x, action=None):
+    def get_action_and_value(self, x, hidden_state, done, action=None):
+        x, hidden_state = self.get_states(x, hidden_state, done)
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+        return action, probs.log_prob(action), probs.entropy(), self.critic(x), hidden_state
 
 
 class WNNActor(nn.Module):
@@ -251,8 +288,8 @@ class WNNActor(nn.Module):
                 output, _ = rnn_out
                 return output[:, -1, :]
 
-        self.critic = nn.Sequential(
-            EnsureSeqDim(),
+        self.critic_rnn = nn.Sequential(
+            #EnsureSeqDim(),
             nn.RNN(
                 input_size=int(obs_dim),
                 hidden_size=int(32),
@@ -260,70 +297,94 @@ class WNNActor(nn.Module):
                 nonlinearity="tanh",
                 batch_first=True,
             ),
-            RNNOutputLastStep(),
+            #RNNOutputLastStep(),
+        )
+        self.critic = nn.Sequential(
             nn.Linear(int(32), 1),
         )
-
-    def get_value(self, x):
+        
+    def get_states(self, network, x, hidden_state, done):
+            # RNN logic
+            batch_size = hidden_state.shape[1]
+            x = x.reshape((-1, batch_size, network.input_size))
+            done = done.reshape((-1, batch_size))
+            new_x = []
+            for h, d in zip(x, done):
+                h, hidden_state = network(
+                    h.unsqueeze(0),
+                    (1.0 - d).view(1, -1, 1) * hidden_state,
+                )
+                new_x += [h]
+            new_x = torch.flatten(torch.cat(new_x), 0, 1)
+            return new_x, hidden_state
+    
+    def get_value(self, x, hidden_state, done):
+        x, _ = self.get_states(self.critic_rnn, x, hidden_state, done)
         return self.critic(x)
 
-    def get_action_and_value(self, x, hidden_state=None, done=None, action=None):
-        if x.dim() != 2:
-            raise ValueError("x must have shape (batch_size, features)")
+    def get_action_and_value(self, x, hidden_state, rnn_hidden_state, done, action=None):
+        # if x.dim() != 2:
+        #     raise ValueError("x must have shape (batch_size, features)")
 
-        if hidden_state is None:
-            hidden_state = self.actor.init_hidden(batch_size=x.shape[0], device=x.device, dtype=x.dtype)
+        # if hidden_state is None:
+        #     hidden_state = self.actor.init_hidden(batch_size=x.shape[0], device=x.device, dtype=x.dtype)
 
-        batch_size = hidden_state.shape[1]
-        is_sequence_batch = x.shape[0] != batch_size
+        # batch_size = hidden_state.shape[1]
+        # is_sequence_batch = x.shape[0] != batch_size
 
-        if done is None:
-            done = torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
-        else:
-            done = done.to(device=x.device, dtype=x.dtype).view(-1)
+        # if done is None:
+        #     done = torch.zeros(x.shape[0], device=x.device, dtype=x.dtype)
+        # else:
+        #     done = done.to(device=x.device, dtype=x.dtype).view(-1)
 
-        if is_sequence_batch:
-            if x.shape[0] % batch_size != 0:
-                raise ValueError("Sequence batch does not align with hidden-state batch size")
-            seq_len = x.shape[0] // batch_size
-            x_seq = x.view(seq_len, batch_size, -1)
-            done_seq = done.view(seq_len, batch_size)
-            if action is not None:
-                action_seq = action.view(seq_len, batch_size)
-            else:
-                action_seq = None
-        else:
-            seq_len = 1
-            x_seq = x.view(1, batch_size, -1)
-            done_seq = done.view(1, batch_size)
-            if action is not None:
-                action_seq = action.view(1, batch_size)
-            else:
-                action_seq = None
+        # if is_sequence_batch:
+        #     if x.shape[0] % batch_size != 0:
+        #         raise ValueError("Sequence batch does not align with hidden-state batch size")
+        #     seq_len = x.shape[0] // batch_size
+        #     x_seq = x.view(seq_len, batch_size, -1)
+        #     done_seq = done.view(seq_len, batch_size)
+        #     if action is not None:
+        #         action_seq = action.view(seq_len, batch_size)
+        #     else:
+        #         action_seq = None
+        # else:
+        #     seq_len = 1
+        #     x_seq = x.view(1, batch_size, -1)
+        #     done_seq = done.view(1, batch_size)
+        #     if action is not None:
+        #         action_seq = action.view(1, batch_size)
+        #     else:
+        #         action_seq = None
 
-        logits_steps = []
-        next_hidden = hidden_state
-        for t in range(seq_len):
-            next_hidden = next_hidden * (1.0 - done_seq[t]).view(1, batch_size, 1)
-            logits_t, next_hidden = self.actor(x_seq[t], next_hidden)
-            logits_steps.append(logits_t)
+        # logits_steps = []
+        # next_hidden = hidden_state
+        # for t in range(seq_len):
+        #     next_hidden = next_hidden * (1.0 - done_seq[t]).view(1, batch_size, 1)
+        #     logits_t, next_hidden = self.actor(x_seq[t], next_hidden)
+        #     logits_steps.append(logits_t)
 
-        logits = torch.stack(logits_steps, dim=0)
-        logits_flat = logits.reshape(-1, logits.shape[-1])
-        probs = Categorical(logits=logits_flat)
+        # logits = torch.stack(logits_steps, dim=0)
+        # logits_flat = logits.reshape(-1, logits.shape[-1])
+        # probs = Categorical(logits=logits_flat)
 
-        if action_seq is None:
-            sampled = probs.sample()
-            action_out = sampled if is_sequence_batch else sampled.view(batch_size)
-            logprob = probs.log_prob(sampled)
-        else:
-            action_flat = action_seq.reshape(-1).long()
-            action_out = action_flat if is_sequence_batch else action_flat.view(batch_size)
-            logprob = probs.log_prob(action_flat)
+        # if action_seq is None:
+        #     sampled = probs.sample()
+        #     action_out = sampled if is_sequence_batch else sampled.view(batch_size)
+        #     logprob = probs.log_prob(sampled)
+        # else:
+        #     action_flat = action_seq.reshape(-1).long()
+        #     action_out = action_flat if is_sequence_batch else action_flat.view(batch_size)
+        #     logprob = probs.log_prob(action_flat)
 
-        entropy = probs.entropy()
-        value = self.critic(x)
-        return action_out, logprob, entropy, value, next_hidden
+        # entropy = probs.entropy()
+        logits, hidden_state = self.get_states(self.actor, x, hidden_state, done)
+        critic_input, rnn_hidden_state = self.get_states(self.critic_rnn, x, rnn_hidden_state, done)
+        #logits = self.actor(x)
+        probs = Categorical(logits=logits)
+        value = self.critic(critic_input)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), value, hidden_state, rnn_hidden_state
 
 
 if __name__ == "__main__":
@@ -546,9 +607,9 @@ if __name__ == "__main__":
 
         #print(f"Iteration {iteration} from {args.num_iterations}, SPS={int(global_step / (time.time() - start_time))}, value_loss={v_loss.item()}, policy_loss={pg_loss.item()}, entropy={entropy_loss.item()}, old_approx_kl={old_approx_kl.item()}, approx_kl={approx_kl.item()}, clipfrac={np.mean(clipfracs)}, explained_variance={explained_var}")
         # if we are at //20 of iterations, evaluate
-        eval_every = max(args.num_iterations // 10, 1)
+        eval_every = max(args.num_iterations // 5, 1)
         # print(iteration, eval_every)
-        if (((iteration -1) % eval_every == 0)):
+        if (((iteration) % eval_every == 0)):
                 episodic_returns = evaluate(
                     agent,
                     envs,
@@ -556,7 +617,7 @@ if __name__ == "__main__":
                     args.env_id,
                     eval_episodes = 10,
                     device = device,
-                    capture_video= True,
+                    capture_video= False,
                     writer=writer,
                     global_step=global_step,
                 )
@@ -565,5 +626,20 @@ if __name__ == "__main__":
                 print(f"Iteration {iteration} from {args.num_iterations}, eval_episodic_return_mean={ret_mean}, eval_episodic_return_std={ret_std}")
 
 
+    episodic_returns =  evaluate(
+        agent,
+        envs,
+        make_env,
+        args.env_id,
+        eval_episodes = 10,
+        device = device,
+        capture_video= True,
+        writer=writer,
+        global_step=global_step,
+    )
+    ret_mean = float(np.mean(episodic_returns))
+    ret_std = float(np.std(episodic_returns))
+    print(f"Iteration {iteration} from {args.num_iterations}, eval_episodic_return_mean={ret_mean}, eval_episodic_return_std={ret_std}")
+    
     envs.close()
     writer.close()

@@ -86,6 +86,8 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
     # WNN
+    wnn_agent: bool = False
+    """" if toggled, the agent will be a WNN agent"""
     hidden_size: int = 100
     """the size of the hidden layers of the RNNDWN"""
     bits: int = 63
@@ -141,17 +143,29 @@ def evaluate(
     agent.eval()
 
     obs, _ = envs.reset()
-    eval_hidden = agent.actor.init_hidden(batch_size=1, device=device, dtype=torch.float32)
+    if args.wnn_agent:
+        eval_hidden = agent.actor.init_hidden(batch_size=1, device=device, dtype=torch.float32)
+        eval_rnn_hidden = torch.zeros(agent.critic_rnn.num_layers, 1, agent.critic_rnn.hidden_size, device=device, dtype=torch.float32)
+    else:
+        eval_hidden = torch.zeros(agent.memory.num_layers, 1, agent.memory.hidden_size, device=device, dtype=torch.float32)
     eval_done = torch.zeros(1, device=device, dtype=torch.float32)
     episodic_returns = []
     episodic_lengths = []
     while len(episodic_returns) < eval_episodes:
         with torch.no_grad():
-            actions, _, _, _, eval_hidden = agent.get_action_and_value(
-                torch.Tensor(obs).to(device),
-                eval_hidden,
-                eval_done,
-            )
+            if args.wnn_agent:
+                actions, _, _, _, eval_hidden, eval_rnn_hidden = agent.get_action_and_value(
+                    torch.Tensor(obs).to(device),
+                    eval_hidden,
+                    eval_rnn_hidden,
+                    eval_done,
+                )
+            else:
+                actions, _, _, _, eval_hidden = agent.get_action_and_value(
+                    torch.Tensor(obs).to(device),
+                    eval_hidden,
+                    eval_done,
+                )
         next_obs, _, terminations, truncations, infos = envs.step(actions.cpu().numpy())
         eval_done = torch.as_tensor(np.logical_or(terminations, truncations), device=device, dtype=torch.float32)
         if "episode" in infos:
@@ -288,21 +302,17 @@ class WNNActor(nn.Module):
                 output, _ = rnn_out
                 return output[:, -1, :]
 
-        self.critic_rnn = nn.Sequential(
-            #EnsureSeqDim(),
-            nn.RNN(
+        self.critic_rnn = nn.RNN(
                 input_size=int(obs_dim),
                 hidden_size=int(32),
                 num_layers=3,
                 nonlinearity="tanh",
                 batch_first=True,
-            ),
-            #RNNOutputLastStep(),
         )
         self.critic = nn.Sequential(
             nn.Linear(int(32), 1),
         )
-        
+
     def get_states(self, network, x, hidden_state, done):
             # RNN logic
             batch_size = hidden_state.shape[1]
@@ -428,8 +438,12 @@ if __name__ == "__main__":
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
     print("environment setup done")
-    # agent = Agent(envs).to(device)
-    agent = WNNActor(envs, args).to(device)
+    if args.wnn_agent:
+        print("Using WNN agent")
+        agent = WNNActor(envs, args).to(device)
+    else:
+        print("Using Normal agent")
+        agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -446,11 +460,17 @@ if __name__ == "__main__":
     next_obs, _ = envs.reset(seed=args.seed)
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
-    next_actor_hidden = agent.actor.init_hidden(batch_size=args.num_envs, device=device, dtype=next_obs.dtype)
+    if args.wnn_agent:
+        next_actor_hidden = agent.actor.init_hidden(batch_size=args.num_envs, device=device, dtype=next_obs.dtype)
+        next_critic_hidden = torch.zeros(agent.critic_rnn.num_layers, args.num_envs, agent.critic_rnn.hidden_size).to(device)
+    else:
+        next_actor_hidden = torch.zeros(agent.memory.num_layers, args.num_envs, agent.memory.hidden_size).to(device)
     
     print("Starting training...")
     for iteration in tqdm(range(1, args.num_iterations + 1)):
         initial_actor_state = next_actor_hidden.clone()
+        if args.wnn_agent:
+            initial_critic_state = next_critic_hidden.clone()
 
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -466,11 +486,19 @@ if __name__ == "__main__":
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
-                action, logprob, _, value, next_actor_hidden = agent.get_action_and_value(
-                    next_obs,
-                    next_actor_hidden,
-                    next_done,
-                )
+                if args.wnn_agent:
+                    action, logprob, _, value, next_actor_hidden, next_critic_hidden = agent.get_action_and_value(
+                        next_obs,
+                        next_actor_hidden,
+                        next_critic_hidden,
+                        next_done,
+                    )
+                else:
+                    action, logprob, _, value, next_actor_hidden = agent.get_action_and_value(
+                        next_obs,
+                        next_actor_hidden,
+                        next_done,
+                    )
                 values[step] = value.flatten()
             actions[step] = action
             logprobs[step] = logprob
@@ -539,12 +567,22 @@ if __name__ == "__main__":
                 mbenvinds = envinds[start:end]
                 mb_inds = flatinds[:, mbenvinds].ravel()  # be really careful about the index
                 mb_hidden = initial_actor_state[:, mbenvinds].contiguous()
-                _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(
-                    b_obs[mb_inds],
-                    mb_hidden,
-                    b_dones[mb_inds],
-                    b_actions.long()[mb_inds],
-                )
+                if args.wnn_agent:
+                    mb_critic_hidden = initial_critic_state[:, mbenvinds].contiguous()
+                    _, newlogprob, entropy, newvalue, _, _ = agent.get_action_and_value(
+                        b_obs[mb_inds],
+                        mb_hidden,
+                        mb_critic_hidden,
+                        b_dones[mb_inds],
+                        b_actions.long()[mb_inds],
+                    )
+                else:
+                    _, newlogprob, entropy, newvalue, _ = agent.get_action_and_value(
+                        b_obs[mb_inds],
+                        mb_hidden,
+                        b_dones[mb_inds],
+                        b_actions.long()[mb_inds],
+                    )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 

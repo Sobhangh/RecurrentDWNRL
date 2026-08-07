@@ -164,11 +164,12 @@ class GridNavEnv(gym.Env):
 
 		hit_obstacle = self.obstacle_grid[nr, nc] == 1
 		if (nr, nc) == self.goal_pos:
-			reward = 50.0
+			reward = 10.0
 			terminated = True
 		elif hit_obstacle:
-			reward = -20.0
+			reward = -5.0
 			nr, nc = r, c
+			terminated = True
 		self.agent_pos = (nr, nc)
 		self.episode_return += float(reward)
 		self.episode_length += 1

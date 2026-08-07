@@ -50,7 +50,7 @@ class Args:
     """the learning rate of the optimizer"""
     num_envs: int = 8
     """the number of parallel game environments"""
-    num_steps: int = 128
+    num_steps: int = 32
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -404,6 +404,7 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     print(f"Run name: {run_name}")
+    print(f"Batch size: {args.batch_size}, Minibatch size: {args.minibatch_size}, Num iterations: {args.num_iterations}")
     if args.track:
         import wandb
         from cred import cred

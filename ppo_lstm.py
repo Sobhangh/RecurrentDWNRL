@@ -14,13 +14,13 @@ import tyro
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-from cleanrl_utils.atari_wrappers import (  # isort:skip
-    ClipRewardEnv,
-    EpisodicLifeEnv,
-    FireResetEnv,
-    MaxAndSkipEnv,
-    NoopResetEnv,
-)
+# from cleanrl_utils.atari_wrappers import (  # isort:skip
+#     ClipRewardEnv,
+#     EpisodicLifeEnv,
+#     FireResetEnv,
+#     MaxAndSkipEnv,
+#     NoopResetEnv,
+# )
 
 
 @dataclass
@@ -86,6 +86,7 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
+    board_dim: int = 8
 
 def make_env(env_id, idx, capture_video, run_name):
     def thunk():
@@ -135,7 +136,7 @@ class Agent(nn.Module):
             layer_init(nn.Linear(64 * 7 * 7, 512)),
             nn.ReLU(),
         )
-        self.lstm = nn.LSTM(obs_dim, 128)
+        self.lstm = nn.LSTM(int(obs_dim), 128)
         for name, param in self.lstm.named_parameters():
             if "bias" in name:
                 nn.init.constant_(param, 0)
@@ -219,6 +220,7 @@ if __name__ == "__main__":
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+    episode_rewards_running_mean = 0
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
@@ -271,8 +273,10 @@ if __name__ == "__main__":
                     if ended:
                         r = float(ep["r"][i])
                         l = int(ep["l"][i])
+                        episode_rewards_running_mean = 0.95 * episode_rewards_running_mean + 0.05 * r
                         #print(f"global_step={global_step}, episodic_return={r}")
                         writer.add_scalar("charts/episodic_return", r, global_step)
+                        writer.add_scalar("charts/episodic_return_running_mean", episode_rewards_running_mean, global_step)
                         writer.add_scalar("charts/episodic_length", l, global_step)
             elif "final_info" in infos:
                 for info in infos["final_info"]:

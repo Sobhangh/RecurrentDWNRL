@@ -154,20 +154,20 @@ class GridNavEnv(gym.Env):
 		else:  # action == 3
 			nr, nc = r, c - 1
 
-		reward = -0.1
+		reward = -0.01
 		terminated = False
 		truncated = False
 
 		if not (0 <= nr < self.dimension and 0 <= nc < self.dimension):
 			nr, nc = r, c
-			reward = -0.2
+			reward = -0.02
 
 		hit_obstacle = self.obstacle_grid[nr, nc] == 1
 		if (nr, nc) == self.goal_pos:
-			reward = 100.0
+			reward = 10.0
 			terminated = True
 		elif hit_obstacle:
-			reward = -2.0
+			reward = -0.2
 			nr, nc = r, c
 			if np.random.random() < 0.2:
 				terminated = True

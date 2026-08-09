@@ -22,6 +22,7 @@ import popgym
 from NavEnv import GridNavEnv
 
 
+
 @dataclass
 class Args:
     exp_name: str = os.path.basename(__file__)[: -len(".py")]
@@ -44,13 +45,15 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "GridNav"
     """the id of the environment"""
-    total_timesteps: int = 500000
+    board_dim: int = 8
+    """the dimension of the board for the GridNav environment"""
+    total_timesteps: int = 5_000_000
     """total timesteps of the experiments"""
-    learning_rate: float = 5e-3
+    learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
     num_envs: int = 8
     """the number of parallel game environments"""
-    num_steps: int = 32
+    num_steps: int = 64
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -84,6 +87,8 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+    WNN_learning_rate: float = 5e-3
+    """the learning rate of the optimizer"""
 
     # WNN
     wnn_agent: bool = False
@@ -106,7 +111,7 @@ def make_env(env_id, idx, capture_video, run_name):
         # else:
         #    env = gym.make(env_id)
         if capture_video and idx == 0:
-            env = GridNavEnv(dimension=4, render_mode="rgb_array")
+            env = GridNavEnv(dimension=args.board_dim, render_mode="rgb_array")
             # Gymnasium may import moviepy for video recording, which can emit
             # a Python 3.12 SyntaxWarning from moviepy's legacy config file.
             with warnings.catch_warnings():
@@ -118,7 +123,7 @@ def make_env(env_id, idx, capture_video, run_name):
                 )
                 env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
         else:
-            env = GridNavEnv(dimension=4, render_mode="rgb_array")
+            env = GridNavEnv(dimension=args.board_dim, render_mode="rgb_array")
             #print(f"env_id={env_id}, idx={idx}, capture_video={capture_video}, run_name={run_name}")
         #env = popgym.envs.position_only_cartpole.PositionOnlyCartPoleEasy()
         #env = gym.wrappers.FlattenObservation(env) 
@@ -208,26 +213,26 @@ class Agent(nn.Module):
         super().__init__()
 
         obs_dim = np.array(envs.single_observation_space.shape).prod()
-        self.memory = nn.RNN(
+        self.memory = nn.GRU(
             input_size=int(obs_dim),
-            hidden_size=int(32),
+            hidden_size=int(64),
             num_layers=3,
-            nonlinearity="tanh",
-            batch_first=True,
+            #nonlinearity="tanh",
+            #batch_first=True,
         )
         self.critic = nn.Sequential(
             # layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
             # nn.Tanh(),
-            # layer_init(nn.Linear(64, 64)),
-            # nn.Tanh(),
-            layer_init(nn.Linear(32, 1), std=1.0),
+            layer_init(nn.Linear(64, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, 1), std=1.0),
         )
         self.actor = nn.Sequential(
             # layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
             # nn.Tanh(),
-            # layer_init(nn.Linear(64, 64)),
-            # nn.Tanh(),
-            layer_init(nn.Linear(32, envs.single_action_space.n), std=0.01),
+            layer_init(nn.Linear(64, 64)),
+            nn.Tanh(),
+            layer_init(nn.Linear(64, envs.single_action_space.n), std=0.01),
         )
 
     def get_states(self, x, hidden_state, done):
@@ -307,7 +312,7 @@ class WNNActor(nn.Module):
                 hidden_size=int(32),
                 num_layers=3,
                 nonlinearity="tanh",
-                batch_first=True,
+                #batch_first=True,
         )
         self.critic = nn.Sequential(
             nn.Linear(int(32), 1),
@@ -445,8 +450,9 @@ if __name__ == "__main__":
     else:
         print("Using Normal agent")
         agent = Agent(envs).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
-
+    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate if not args.wnn_agent else args.WNN_learning_rate, eps=1e-5)
+    episode_rewards_running_mean = 0
+    
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
@@ -476,7 +482,7 @@ if __name__ == "__main__":
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            lrnow = frac * args.learning_rate
+            lrnow = frac * args.learning_rate if not args.wnn_agent else frac * args.WNN_learning_rate
             optimizer.param_groups[0]["lr"] = lrnow
 
         for step in range(0, args.num_steps):
@@ -519,8 +525,11 @@ if __name__ == "__main__":
                     if ended:
                         r = float(ep["r"][i])
                         l = int(ep["l"][i])
+                        episode_rewards_running_mean = 0.95 * episode_rewards_running_mean + 0.05 * r
+
                         #print(f"global_step={global_step}, episodic_return={r}")
                         writer.add_scalar("charts/episodic_return", r, global_step)
+                        writer.add_scalar("charts/episodic_return_running_mean", episode_rewards_running_mean, global_step)
                         writer.add_scalar("charts/episodic_length", l, global_step)
             elif "final_info" in infos:
                 for info in infos["final_info"]:
@@ -531,7 +540,10 @@ if __name__ == "__main__":
 
         # bootstrap value if not done
         with torch.no_grad():
-            next_value = agent.get_value(next_obs).reshape(1, -1)
+            if args.wnn_agent:
+                next_value = agent.get_value(next_obs, next_critic_hidden, next_done).reshape(1, -1)
+            else:
+                next_value = agent.get_value(next_obs, next_actor_hidden, next_done).reshape(1, -1)
             advantages = torch.zeros_like(rewards).to(device)
             lastgaelam = 0
             for t in reversed(range(args.num_steps)):
@@ -646,7 +658,7 @@ if __name__ == "__main__":
 
         #print(f"Iteration {iteration} from {args.num_iterations}, SPS={int(global_step / (time.time() - start_time))}, value_loss={v_loss.item()}, policy_loss={pg_loss.item()}, entropy={entropy_loss.item()}, old_approx_kl={old_approx_kl.item()}, approx_kl={approx_kl.item()}, clipfrac={np.mean(clipfracs)}, explained_variance={explained_var}")
         # if we are at //20 of iterations, evaluate
-        eval_every = max(args.num_iterations // 5, 1)
+        eval_every = max(args.num_iterations // 1, 1)
         # print(iteration, eval_every)
         if (((iteration) % eval_every == 0)):
                 episodic_returns = evaluate(
@@ -665,20 +677,5 @@ if __name__ == "__main__":
                 print(f"Iteration {iteration} from {args.num_iterations}, eval_episodic_return_mean={ret_mean}, eval_episodic_return_std={ret_std}")
 
 
-    episodic_returns =  evaluate(
-        agent,
-        envs,
-        make_env,
-        args.env_id,
-        eval_episodes = 10,
-        device = device,
-        capture_video= True,
-        writer=writer,
-        global_step=global_step,
-    )
-    ret_mean = float(np.mean(episodic_returns))
-    ret_std = float(np.std(episodic_returns))
-    print(f"Iteration {iteration} from {args.num_iterations}, eval_episodic_return_mean={ret_mean}, eval_episodic_return_std={ret_std}")
-    
     envs.close()
     writer.close()

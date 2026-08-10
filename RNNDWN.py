@@ -49,6 +49,7 @@ class RNNDWN(nn.Module):
             raise ValueError("num_layers must be at least 1")
 
         self.input_size = input_dim * 3 #bits
+        self.input_dim = input_dim
         self.output_size = output_dim * 15
         self.hidden_size = hidden_size
         self.num_layers = num_layers
@@ -94,8 +95,8 @@ class RNNDWN(nn.Module):
         if x.dim() == 1:
             x = x.unsqueeze(0)
             squeeze_output = True
-        elif x.dim() != 2:
-            raise ValueError("x must have shape (features,) or (batch_size, features)")
+        # elif x.dim() != 2:
+        #     raise ValueError("x must have shape (features,) or (batch_size, features)")
 
         if hidden_state is None:
             hidden_state = self.init_hidden(batch_size=x.shape[0], device=x.device, dtype=x.dtype)

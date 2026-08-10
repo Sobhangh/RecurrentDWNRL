@@ -91,7 +91,7 @@ class Args:
     """the learning rate of the optimizer"""
 
     # WNN
-    wnn_agent: bool = False
+    wnn_agent: bool = True
     """" if toggled, the agent will be a WNN agent"""
     hidden_size: int = 100
     """the size of the hidden layers of the RNNDWN"""
@@ -213,11 +213,11 @@ class Agent(nn.Module):
         super().__init__()
 
         obs_dim = np.array(envs.single_observation_space.shape).prod()
-        self.memory = nn.GRU(
+        self.memory = nn.RNN(
             input_size=int(obs_dim),
             hidden_size=int(64),
             num_layers=3,
-            #nonlinearity="tanh",
+            nonlinearity="tanh",
             #batch_first=True,
         )
         self.critic = nn.Sequential(
@@ -309,27 +309,39 @@ class WNNActor(nn.Module):
 
         self.critic_rnn = nn.RNN(
                 input_size=int(obs_dim),
-                hidden_size=int(32),
+                hidden_size=int(64),
                 num_layers=3,
                 nonlinearity="tanh",
                 #batch_first=True,
         )
         self.critic = nn.Sequential(
-            nn.Linear(int(32), 1),
+            nn.Linear(int(64), 1),
         )
 
     def get_states(self, network, x, hidden_state, done):
             # RNN logic
             batch_size = hidden_state.shape[1]
-            x = x.reshape((-1, batch_size, network.input_size))
+            #print(x.shape, hidden_state.shape, done.shape)
+            if isinstance(network, RNNDWN):
+                x = x.reshape((-1, batch_size, network.input_dim))
+            else:
+                x = x.reshape((-1, batch_size, network.input_size))
+            #print(f"x reshaped to: {x.shape}")
             done = done.reshape((-1, batch_size))
             new_x = []
             for h, d in zip(x, done):
-                h, hidden_state = network(
-                    h.unsqueeze(0),
-                    (1.0 - d).view(1, -1, 1) * hidden_state,
-                )
-                new_x += [h]
+                if isinstance(network, RNNDWN):
+                    h, hidden_state = network(
+                        h, #.unsqueeze(0),
+                        (1.0 - d).view(1, -1, 1) * hidden_state,
+                    )
+                    new_x += [h.unsqueeze(0)]
+                else:
+                    h, hidden_state = network(
+                        h.unsqueeze(0),
+                        (1.0 - d).view(1, -1, 1) * hidden_state,
+                    )
+                    new_x += [h]
             new_x = torch.flatten(torch.cat(new_x), 0, 1)
             return new_x, hidden_state
     
@@ -392,8 +404,9 @@ class WNNActor(nn.Module):
         #     logprob = probs.log_prob(action_flat)
 
         # entropy = probs.entropy()
-        logits, hidden_state = self.get_states(self.actor, x, hidden_state, done)
         critic_input, rnn_hidden_state = self.get_states(self.critic_rnn, x, rnn_hidden_state, done)
+        logits, hidden_state = self.get_states(self.actor, x, hidden_state, done)
+        
         #logits = self.actor(x)
         probs = Categorical(logits=logits)
         value = self.critic(critic_input)

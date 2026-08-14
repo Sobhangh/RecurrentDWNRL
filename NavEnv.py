@@ -53,6 +53,7 @@ class GridNavEnv(gym.Env):
 		self.obstacles = np.empty((0, 2), dtype=np.int32)
 		self.episode_return = 0.0
 		self.episode_length = 0
+		self.max_episode_length = 100  # Maximum steps per episode
 
 		self._generate_obstacles()
 
@@ -174,6 +175,9 @@ class GridNavEnv(gym.Env):
 		self.agent_pos = (nr, nc)
 		self.episode_return += float(reward)
 		self.episode_length += 1
+
+		if self.episode_length >= self.max_episode_length:
+			truncated = True
 
 		observation = self._adjacent_observation()
 		info = {

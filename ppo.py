@@ -47,13 +47,13 @@ class Args:
     """the id of the environment"""
     board_dim: int = 8
     """the dimension of the board for the GridNav environment"""
-    total_timesteps: int = 5_000_000
+    total_timesteps: int = 500_000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
     num_envs: int = 8
     """the number of parallel game environments"""
-    num_steps: int = 64
+    num_steps: int = 32
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -93,11 +93,11 @@ class Args:
     # WNN
     wnn_agent: bool = True
     """" if toggled, the agent will be a WNN agent"""
-    hidden_size: int = 100
+    hidden_size: int = 800
     """the size of the hidden layers of the RNNDWN"""
     bits: int = 63
     """the number of bits per input dimension for the thermometer"""
-    n: int = 4
+    n: int = 6
     """number of LUT inputs"""
     nb_layers: int = 2
     """number of hidden layers"""
@@ -463,7 +463,26 @@ if __name__ == "__main__":
     else:
         print("Using Normal agent")
         agent = Agent(envs).to(device)
-    optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate if not args.wnn_agent else args.WNN_learning_rate, eps=1e-5)
+    if args.wnn_agent:
+        optimizer = optim.Adam(
+            [
+                {
+                    "params": (
+                        list(agent.actor.parameters())
+                    ),
+                    "lr": args.WNN_learning_rate,
+                },
+                {
+                    "params": list(agent.critic_rnn.parameters()) + list(agent.critic.parameters()),
+                    "lr": args.learning_rate,
+                },
+            ],
+            eps=1e-5,
+        )
+        base_lrs = [args.WNN_learning_rate, args.learning_rate]
+    else:   
+        optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+        base_lrs = [args.learning_rate]
     episode_rewards_running_mean = 0
     
     # ALGO Logic: Storage setup
@@ -495,8 +514,10 @@ if __name__ == "__main__":
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
-            lrnow = frac * args.learning_rate if not args.wnn_agent else frac * args.WNN_learning_rate
-            optimizer.param_groups[0]["lr"] = lrnow
+            for param_group, base_lr in zip(optimizer.param_groups, base_lrs):
+                param_group["lr"] = frac * base_lr
+            # lrnow = frac * args.learning_rate if not args.wnn_agent else frac * args.WNN_learning_rate
+            # optimizer.param_groups[0]["lr"] = lrnow
 
         for step in range(0, args.num_steps):
             #print(f"Iteration {iteration}, Step {step}, Global Step {global_step}")

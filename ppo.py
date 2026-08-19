@@ -45,15 +45,15 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "GridNav"
     """the id of the environment"""
-    board_dim: int = 8
+    board_dim: int = 16
     """the dimension of the board for the GridNav environment"""
-    total_timesteps: int = 500_000
+    total_timesteps: int = 1_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
     num_envs: int = 8
     """the number of parallel game environments"""
-    num_steps: int = 32
+    num_steps: int = 64
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -93,11 +93,11 @@ class Args:
     # WNN
     wnn_agent: bool = True
     """" if toggled, the agent will be a WNN agent"""
-    hidden_size: int = 800
+    hidden_size: int = 1500
     """the size of the hidden layers of the RNNDWN"""
     bits: int = 63
     """the number of bits per input dimension for the thermometer"""
-    n: int = 6
+    n: int = 4
     """number of LUT inputs"""
     nb_layers: int = 2
     """number of hidden layers"""

@@ -50,7 +50,7 @@ class RNNDWN(nn.Module):
 
         self.input_size = input_dim * 3 #bits
         self.input_dim = input_dim
-        self.output_size = output_dim * 40
+        self.output_size = output_dim * 25
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.bits = bits
@@ -68,7 +68,8 @@ class RNNDWN(nn.Module):
 
         #self.hidden_layer = self.hidden_layers[0]
         self.output_layer = nn.Sequential(
-            LogicDense(hidden_size, self.output_size, parametrization="warp", lut_rank=n, device=device),
+            LogicDense(hidden_size , hidden_size // n, parametrization="warp", lut_rank=n, device=device),
+            LogicDense(hidden_size // n, self.output_size, parametrization="warp", lut_rank=n, device=device),
             GroupSum(k=output_dim, tau=1.0, device=device)
         )
 
